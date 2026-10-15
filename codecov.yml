@@ -11,13 +11,8 @@ coverage:
         # (Note that patch coverage will still be required to be at least
         # the project coverage.)
         threshold: 1%
-    patch:
-      default:
-        # Windows-only raw-dylib code cannot be covered by Linux CI.
-        target: 0%
 
 ignore:
   - tests/
   - pytests/
   - src/test_hygiene/*.rs
-  - pyo3-ffi/src/impl_/libpython_link_bridge.rs
