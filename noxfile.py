@@ -1351,7 +1351,7 @@ def ffi_check(session: nox.Session):
         # other platforms
         _run_cargo(session, "run", _FFI_CHECK, env=no_raw_dylib_env)
     _run_cargo(session, "run", _FFI_CHECK, env=raw_dylib_env)
-    _check_raw_dylib_macro(session)
+    _check_raw_dylib_private_fns(session)
 
 
 @nox.session(name="test-version-limits")
@@ -1371,36 +1371,13 @@ def test_version_limits(session: nox.Session):
         config_file.set("CPython", "3.16")
         _run_cargo(session, "check", env=env)
 
-        # We do not allow allow building with max version + 2
+        # The maximum version is not checked: versions beyond it build with
+        # a warning (they are untested)
         assert "3.17" not in PY_VERSIONS
         config_file.set("CPython", "3.17")
-        _run_cargo(session, "check", env=env, expect_error=True)
-
-        # ... but should build with PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1
-        env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"] = "1"
         _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"]
-
-        # and PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1
-        env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"] = "1"
-        _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"]
 
         # max version + 2 should build if abi3 is explicitly requested
-        _run_cargo(session, "check", "--features=pyo3/abi3", env=env)
-
-        # max_version + 1 also should build with forward compatibility
-        config_file.set("CPython", "3.16")
-        env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"] = "1"
-        _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"]
-
-        # including the other spelling for the environment variable
-        env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"] = "1"
-        _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"]
-
-        # or if abi3 is explicitly requested
         _run_cargo(session, "check", "--features=pyo3/abi3", env=env)
 
         # we only support 3.11 PyPy
@@ -1420,20 +1397,13 @@ def test_version_limits(session: nox.Session):
         config_file.set("CPython", "3.15t")
         _run_cargo(session, "check", env=env)
 
-        # 3.16t should build with abi3t forward compatibility
+        # 3.16t is one version beyond the maximum, allowed with a warning
         config_file.set("CPython", "3.16t")
-        env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"] = "1"
         _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"]
 
-        # 3.17t isn't supported
+        # 3.17t is two versions beyond the maximum, still allowed with a warning
         config_file.set("CPython", "3.17t")
-        _run_cargo(session, "check", env=env, expect_error=True)
-
-        # Setting PYO3_USE_ABI3T_FORWARD_COMPATIBILITY=1 succeeds
-        env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"] = "1"
         _run_cargo(session, "check", env=env)
-        del env["PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY"]
 
         # 3.17t CPython should build if abi3t is explicitly requested
         _run_cargo(session, "check", "--features=pyo3/abi3t", env=env)
@@ -1473,59 +1443,9 @@ def test_version_limits(session: nox.Session):
     )
 
 
-def _check_raw_dylib_macro(session: nox.Session):
-    """Check that extern_libpython! macro covers all supported Python DLL names."""
-    min_version, max_version = _parse_supported_interpreter_version("cpython")
-    min_minor = int(min_version.split(".")[1])
-    max_minor = int(max_version.split(".")[1])
-
-    # Build the set of DLL names that default_lib_name_windows can produce
-    expected_dlls = {"python3", "python3_d"}
-    for minor in range(min_minor, max_minor + 2):  # allow prerelease of next version
-        expected_dlls.add(f"python3{minor}")
-        expected_dlls.add(f"python3{minor}_d")
-        if minor >= 13:
-            expected_dlls.add(f"python3{minor}t")
-            expected_dlls.add(f"python3{minor}t_d")
-        if minor >= 15:
-            expected_dlls.add("python3t")
-            expected_dlls.add("python3t_d")
-
-    # PyPy DLL names (libpypy3.X-c.dll)
-    pypy_min, pypy_max = _parse_supported_interpreter_version("pypy")
-    pypy_min_minor = int(pypy_min.split(".")[1])
-    pypy_max_minor = int(pypy_max.split(".")[1])
-    for minor in range(
-        pypy_min_minor,
-        pypy_max_minor + 2,  # allow prerelease of next version
-    ):
-        expected_dlls.add(f"libpypy3.{minor}-c")
-
-    # GraalPy DLL (python-native.dll)
-    expected_dlls.add("python-native")
-
-    # Parse the DLL name list in the extern_libpython!(@impl ...) invocation
+def _check_raw_dylib_private_fns(session: nox.Session):
+    """Check that extern_libpython_maybe_private_fn! covers all required private functions."""
     lib_rs = (PYO3_DIR / "pyo3-ffi" / "src" / "impl_" / "macros.rs").read_text()
-    found_dlls = set(re.findall(r'"((?:python(?!XY)|libpypy)[^"]+)"', lib_rs))
-
-    missing = expected_dlls - found_dlls
-    extra = found_dlls - expected_dlls
-    errors = []
-    if missing:
-        errors.append(
-            f"Missing DLL names in extern_libpython! macro: {sorted(missing)}"
-        )
-    if extra:
-        errors.append(f"Extra DLL names in extern_libpython! macro: {sorted(extra)}")
-    if errors:
-        session.error(
-            "\n".join(errors)
-            + "\n\nUpdate the extern_libpython! macro in pyo3-ffi/src/impl_/macros.rs"
-            + " to match supported Python versions in pyo3-ffi/Cargo.toml"
-        )
-    session.log(
-        f"extern_libpython! macro covers all {len(expected_dlls)} expected DLL names ✓"
-    )
 
     private_fn_allowlist = set(re.findall(r"\[\s*(_Py[A-Za-z0-9_]*)\s*\]", lib_rs))
     required_private_fns = _raw_dylib_x86_private_functions()

@@ -163,9 +163,14 @@ pub fn print_expected_cfgs() {
         r#"cargo:rustc-check-cfg=cfg(py_sys_config, values("Py_DEBUG", "Py_REF_DEBUG", "Py_TRACE_REFS", "COUNT_ALLOCS"))"#
     );
 
+    println!("cargo:rustc-check-cfg=cfg(pyo3_dll_codegen)");
+
     // allow `Py_3_*` cfgs from the minimum supported version up to the
-    // maximum minor version (+1 for development for the next)
-    for i in impl_::MINIMUM_SUPPORTED_VERSION.minor..=impl_::STABLE_ABI_MAX_MINOR + 1 {
+    // maximum minor version (+1 for development for the next), plus a margin
+    // for future versions which are not checked at build time
+    for i in impl_::MINIMUM_SUPPORTED_VERSION.minor
+        ..=impl_::STABLE_ABI_MAX_MINOR + impl_::PY_3_CFG_FUTURE_MARGIN
+    {
         println!("cargo:rustc-check-cfg=cfg(Py_3_{i})");
     }
 }

@@ -8,6 +8,8 @@ project(
 
 MINIMUM_SUPPORTED_VERSION_MINOR = 8
 STABLE_ABI_MAX_MINOR = 15
+# Margin above the maximum supported version (not checked at build time).
+PY_3_CFG_FUTURE_MARGIN = 15
 MINIMUM_SUPPORTED_VERSION_PYPY_MINOR = 11
 MAXIMUM_SUPPORTED_VERSION_PYPY_MINOR = 11
 
@@ -21,40 +23,18 @@ extra_args += [
   '--check-cfg', 'cfg(GraalPy)',
   '--check-cfg', 'cfg(RustPython)',
   '--check-cfg', 'cfg(py_sys_config, values("Py_DEBUG", "Py_REF_DEBUG", "Py_TRACE_REFS", "COUNT_ALLOCS"))',
+  # Set when a specialized `extern_libpython!` macro is generated (see below).
+  '--check-cfg', 'cfg(pyo3_dll_codegen)',
 ]
 
 # Allow 'Py_3_{minor}' cfgs from the minimum supported version up to
-# the maximum minor version (+1 for development for the next).
-foreach i : range(MINIMUM_SUPPORTED_VERSION_MINOR, STABLE_ABI_MAX_MINOR + 2)
+# the maximum minor version (+1 for development for the next), plus a
+# margin for future versions which are not checked at build time.
+foreach i : range(MINIMUM_SUPPORTED_VERSION_MINOR, STABLE_ABI_MAX_MINOR + PY_3_CFG_FUTURE_MARGIN + 2)
   extra_args += ['--check-cfg', f'cfg(Py_3_@i@)']
 endforeach
 
-# Allow all possible 'pyo3_dll' cfg values for raw-dylib linking on Windows.
-dll_names = ['python3', 'python3_d', 'python3t', 'python3t_d']
 
-foreach i : range(MINIMUM_SUPPORTED_VERSION_MINOR, STABLE_ABI_MAX_MINOR + 2)
-  # CPython DLL names.
-  dll_names += [f'python3@i@', f'python3@i@_d']
-  if i >= 13
-    dll_names += [f'python3@i@t', f'python3@i@t_d']
-  endif
-endforeach
-
-foreach i : range(MINIMUM_SUPPORTED_VERSION_PYPY_MINOR, MAXIMUM_SUPPORTED_VERSION_PYPY_MINOR + 2)
-  # PyPy DLL names.
-  dll_names += [f'libpypy3.@i@-c']
-endforeach
-
-# GraalPy DLL name
-dll_names += ['python-native']
-
-dll_names_quoted = []
-foreach name : dll_names
-  dll_names_quoted += f'"@name@"'
-endforeach
-
-pyo3_dll_values = ', '.join(dll_names_quoted)
-extra_args += ['--check-cfg', f'cfg(pyo3_dll, values(@pyo3_dll_values@))']
 
 
 fs = import('fs')
@@ -167,7 +147,37 @@ if is_windows
   else
     py_lib_name = 'python' + abi + (py_debug ? '_d' : '')
   endif
-  extra_args += ['--cfg', 'pyo3_use_raw_dylib', '--cfg', f'pyo3_dll="@py_lib_name@"']
+  extra_args += ['--cfg', 'pyo3_use_raw_dylib', '--cfg', 'pyo3_dll_codegen']
+
+  # The DLL name is detected above, but `#[link(name = "...")]` needs a string
+  # literal, so it cannot be passed via a cfg value. Generate a specialized
+  # `extern_libpython!` macro into `OUT_DIR` (which rustc reads via
+  # `env!("OUT_DIR")`), so that no hard-coded list of known DLL names is needed
+  # and future Python versions work without changes.
+  #
+  # Cargo sets `OUT_DIR` itself; for Meson, the build environment must provide
+  # it (the meson-python build backend in `examples/meson-starter` does).
+  out_dir = run_command(
+    py, '-c', 'import os; print(os.environ.get("OUT_DIR", ""))',
+    check : false,
+  ).stdout().strip()
+  if out_dir == ''
+    error('pyo3-ffi Meson builds on Windows require the OUT_DIR environment variable ' +
+          'so that the detected Python DLL name can be written to the generated ' +
+          '`extern_libpython!` macro. Cargo sets this automatically; Meson build ' +
+          'environments (e.g. meson-python backends) must set it too.')
+  endif
+  configure_file(
+    input : 'extern_libpython_link.rs.in',
+    output : 'extern_libpython_link.rs',
+    configuration : {'PYO3_DLL_NAME' : py_lib_name},
+  )
+  run_command(
+    py, '-c',
+    'import os, shutil, sys; os.makedirs(sys.argv[2], exist_ok=True); shutil.copyfile(sys.argv[1], os.path.join(sys.argv[2], "extern_libpython_link.rs"))',
+    join_paths(meson.current_build_dir(), 'extern_libpython_link.rs'), out_dir,
+    check : true,
+  )
 endif
 
 

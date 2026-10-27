@@ -162,10 +162,12 @@ Some of the functionality of `pyo3-build-config`:
     When cross compiling extension modules it is often possible to make it work without any
     additional user input.
   - On Windows, `pyo3-ffi` uses Rust's `raw-dylib` linking feature to link against the Python DLL
-    directly without needing import libraries (`.lib` files). The build script emits a `pyo3_dll`
-    cfg with the target DLL name, and the `extern_libpython!` macro expands to the appropriate
+    directly without needing import libraries (`.lib` files). The build script detects the target
+    DLL name and generates an `extern_libpython!` macro which expands to the appropriate
     `#[link(name = "...", kind = "raw-dylib")]` attribute. This enables cross compiling Python
     extensions for Windows without having to install any Windows Python libraries.
+    Meson builds generate the same macro into `$OUT_DIR/extern_libpython_link.rs`, so they
+    require `OUT_DIR` to be set by the build environment (e.g. a meson-python build backend).
     This can be opted out by setting `PYO3_USE_RAW_DYLIB` to anything other than "1".
 
 <!-- External Links -->

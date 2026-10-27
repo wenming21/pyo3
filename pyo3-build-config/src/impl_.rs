@@ -39,6 +39,14 @@ const MINIMUM_SUPPORTED_VERSION_GRAALPY: PythonVersion = PythonVersion {
 /// Maximum Python version that can be used as minimum required Python version with abi3.
 pub(crate) const STABLE_ABI_MAX_MINOR: u8 = 15;
 
+/// Margin above `STABLE_ABI_MAX_MINOR` for the `Py_3_*` check-cfgs.
+///
+/// The maximum Python version is not checked at build time (future versions
+/// build with a warning), so `Py_3_*` cfgs for newer interpreters must also be
+/// accepted to avoid `unexpected_cfgs` warnings. The margin only needs bumping
+/// when a Python version beyond it is released.
+pub(crate) const PY_3_CFG_FUTURE_MARGIN: u8 = 15;
+
 #[cfg(test)]
 thread_local! {
     static READ_ENV_VARS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };

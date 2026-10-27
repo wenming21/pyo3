@@ -1,0 +1,21 @@
+macro_rules! extern_libpython {
+    // Explicit ABI
+    ($abi:literal { $($body:tt)* }) => {
+        #[cfg_attr(
+            all(windows, pyo3_use_raw_dylib, target_arch = "x86"),
+            link(name = "@PYO3_DLL_NAME@", kind = "raw-dylib", import_name_type = "undecorated")
+        )]
+        #[cfg_attr(
+            all(windows, pyo3_use_raw_dylib, not(target_arch = "x86")),
+            link(name = "@PYO3_DLL_NAME@", kind = "raw-dylib")
+        )]
+        #[cfg_attr(all(windows, not(pyo3_use_raw_dylib)), link(name = "pythonXY"))]
+        unsafe extern $abi {
+            extern_libpython_items! { $($body)* }
+        }
+    };
+    // Default ABI: "C"
+    ($($body:tt)*) => {
+        extern_libpython!("C" { $($body)* });
+    };
+}

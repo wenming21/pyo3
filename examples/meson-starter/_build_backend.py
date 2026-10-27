@@ -131,6 +131,12 @@ def _cargo_environment():
     # sufficient for this example: only its PyO3 crates use CARGO_PKG_VERSION.
     previous = os.environ.get("CARGO_PKG_VERSION")
     os.environ["CARGO_PKG_VERSION"] = version
+    # pyo3-ffi's Meson build generates its raw-dylib `extern_libpython!` macro
+    # into `OUT_DIR`, which rustc reads via `env!("OUT_DIR")`. Cargo sets this
+    # variable itself; Meson does not, so provide it for the build.
+    out_dir = tempfile.mkdtemp(prefix="pyo3-out-")
+    previous_out_dir = os.environ.get("OUT_DIR")
+    os.environ["OUT_DIR"] = out_dir
     try:
         yield
     finally:
@@ -138,6 +144,11 @@ def _cargo_environment():
             os.environ.pop("CARGO_PKG_VERSION", None)
         else:
             os.environ["CARGO_PKG_VERSION"] = previous
+        if previous_out_dir is None:
+            os.environ.pop("OUT_DIR", None)
+        else:
+            os.environ["OUT_DIR"] = previous_out_dir
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):

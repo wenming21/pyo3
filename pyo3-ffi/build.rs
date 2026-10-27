@@ -1,9 +1,9 @@
 use pyo3_build_config::{
     InterpreterConfig, PythonAbiKind, PythonImplementation, PythonVersion, StableAbi, bail, ensure,
     pyo3_build_script_impl::{
-        BuildConfig, BuildConfigSource, MaximumVersionExceeded, cargo_env_var, env_var,
-        errors::Result, is_linking_libpython_for_target, print_feature_cfgs,
-        print_libpython_rpath_link_args, resolve_build_config, target_triple_from_env,
+        BuildConfig, BuildConfigSource, cargo_env_var, env_var, errors::Result,
+        is_linking_libpython_for_target, print_feature_cfgs, print_libpython_rpath_link_args,
+        resolve_build_config, target_triple_from_env,
     },
     warn,
 };
@@ -91,37 +91,15 @@ fn ensure_python_version(interpreter_config: &InterpreterConfig) -> Result<()> {
             expected_next_version.major, expected_next_version.minor,
         );
     } else if interp_version > expected_next_version {
-        let mut error = MaximumVersionExceeded::new(interpreter_config, supported_versions.max);
-        if interpreter_config.target_abi().kind().is_free_threaded()
-            && implementation == PythonImplementation::CPython
-        {
-            if interp_version >= PY_3_15 {
-                if env_var("PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY")
-                    .is_none_or(|os_str| os_str != "1")
-                {
-                    error.add_help(
-                        "set PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1 to suppress this check and build anyway using the free-threaded stable ABI"
-                    );
-                    return Err(error.finish().into());
-                }
-            } else {
-                error.add_help(format!(
-                    "the free-threaded build of CPython {}.{} does not support the limited API so this check cannot be suppressed.", interp_version.major, interp_version.minor
-                ).as_str());
-                return Err(error.finish().into());
-            }
-        }
-        // Only CPython and PyPy support the stable ABI
-        if matches!(
-            implementation,
-            PythonImplementation::CPython | PythonImplementation::PyPy
-        ) && env_var("PYO3_USE_ABI3_FORWARD_COMPATIBILITY").is_none_or(|os_str| os_str != "1")
-            && env_var("PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY")
-                .is_none_or(|os_str| os_str != "1")
-        {
-            error.add_help("set PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1 to suppress this check and build anyway using the stable ABI");
-            return Err(error.finish().into());
-        }
+        // The maximum version is not checked: future Python versions are
+        // allowed to build (with a warning), so that PyO3 does not need to be
+        // updated for every new Python release.
+        warn!(
+            "The configured {implementation} {interp_version} is newer than PyO3's maximum \
+             supported version ({}); this version has not been tested with PyO3 and the \
+             build artifacts may not work correctly.",
+            supported_versions.max,
+        );
     }
 
     if interpreter_config.target_abi().kind().is_free_threaded() {
@@ -190,70 +168,74 @@ fn ensure_target_pointer_width(interpreter_config: &InterpreterConfig) -> Result
     Ok(())
 }
 
-/// `raw-dylib` currently does not support arbitrary names
-/// (see https://internals.rust-lang.org/t/support-renames-with-link-name-kind-raw-dylib/24415)
-/// so if the lib name is not one of the known subset, we must fall back to full linking.
-fn lib_name_is_known_for_raw_dylib(lib_name: &str) -> bool {
-    if matches!(
-        lib_name,
-        // pyo3_dll cfg for raw-dylib linking on Windows
-        "python3" | "python3_d" | "python3t" | "python3t_d"
-        // GraalPy DLL name
-        | "python-native"
-    ) {
-        return true;
-    }
-
-    // support raw-dylib linking for all CPython versions supported, plus the next prerelease
-    for i in SUPPORTED_VERSIONS_CPYTHON.min.minor..=SUPPORTED_VERSIONS_CPYTHON.max.minor + 1 {
-        if lib_name == format!("python3{i}") || lib_name == format!("python3{i}_d") {
-            return true;
-        }
-        if i >= 13 && (lib_name == format!("python3{i}t") || lib_name == format!("python3{i}t_d")) {
-            return true;
-        }
-    }
-    // PyPy DLL names (libpypy3.X-c.dll)
-    for i in SUPPORTED_VERSIONS_PYPY.min.minor..=SUPPORTED_VERSIONS_PYPY.max.minor {
-        if lib_name == format!("libpypy3.{i}-c") {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Whether to use raw-dylib linking.
 ///
-/// Currently, this only applies if all of the following are true:
-/// - The target OS is Windows.
-/// - The Python library name is one of the [known subset][lib_name_is_known_for_raw_dylib].
-/// - The `PYO3_USE_RAW_DYLIB` environment variable is not set, or is set to `1`.
+/// Currently, this only applies if the target OS is Windows and the
+/// `PYO3_USE_RAW_DYLIB` environment variable is not set, or is set to `1`.
+///
+/// The Python library name does not need to be known in advance: the build
+/// script generates an `extern_libpython!` macro specialized to the detected
+/// DLL name, so `raw-dylib` works for any name (including future Python
+/// versions) without a hard-coded list.
 ///
 /// NB in some cases (e.g. mixed C / Rust builds) it might be necessary to link the full Python
 /// library rather than rely on the symbols which PyO3 defines as raw-dylib, which is why
 /// we have the opt-out env var.
-fn should_use_raw_dylib_linking(lib_name: &str) -> bool {
-    let target_os = cargo_env_var("CARGO_CFG_TARGET_OS").unwrap();
-    if target_os != "windows" {
+fn should_use_raw_dylib_linking() -> bool {
+    if cargo_env_var("CARGO_CFG_TARGET_OS").unwrap() != "windows" {
         return false;
     }
+    env_var("PYO3_USE_RAW_DYLIB").is_none_or(|os_str| os_str == "1")
+}
 
-    match (
-        lib_name_is_known_for_raw_dylib(lib_name),
-        env_var("PYO3_USE_RAW_DYLIB"),
-    ) {
-        (true, None) => true,
-        (true, Some(os_str)) if os_str == "1" => true,
-        (false, Some(os_str)) if os_str == "1" => {
-            warn!(
-                "PYO3_USE_RAW_DYLIB is set to 1 but the Python library name is not recognized. \
-                Falling back to full linking."
-            );
-            false
-        }
-        _ => false,
-    }
+/// Writes an `extern_libpython!` macro definition specialized to `lib_name` into
+/// `OUT_DIR`, so that the `#[link(name = "...", kind = "raw-dylib")]` attribute can
+/// use the automatically detected DLL name instead of matching against a hard-coded
+/// list of known names in `pyo3-ffi/src/impl_/macros.rs`.
+///
+/// `#[link]` requires a string literal, so the name cannot be passed via a cfg
+/// value; generating the macro is the only way to avoid the hard-coded list.
+/// Meson builds can generate the same file (see `pyo3-ffi/meson.build`); builds
+/// which provide no `OUT_DIR` fall back to the static macro definition.
+fn emit_extern_libpython_macro(lib_name: &str) {
+    assert!(
+        !lib_name.is_empty()
+            && lib_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+        "unexpected characters in Python library name `{lib_name}`"
+    );
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR is always set for build scripts");
+    let path = std::path::Path::new(&out_dir).join("extern_libpython_link.rs");
+    std::fs::write(
+        &path,
+        format!(
+            r#"macro_rules! extern_libpython {{
+    // Explicit ABI
+    ($abi:literal {{ $($body:tt)* }}) => {{
+        #[cfg_attr(
+            all(windows, pyo3_use_raw_dylib, target_arch = "x86"),
+            link(name = "{lib_name}", kind = "raw-dylib", import_name_type = "undecorated")
+        )]
+        #[cfg_attr(
+            all(windows, pyo3_use_raw_dylib, not(target_arch = "x86")),
+            link(name = "{lib_name}", kind = "raw-dylib")
+        )]
+        #[cfg_attr(all(windows, not(pyo3_use_raw_dylib)), link(name = "pythonXY"))]
+        unsafe extern $abi {{
+            extern_libpython_items! {{ $($body)* }}
+        }}
+    }};
+    // Default ABI: "C"
+    ($($body:tt)*) => {{
+        extern_libpython!("C" {{ $($body)* }});
+    }};
+}}
+"#
+        ),
+    )
+    .expect("failed to write extern_libpython_link.rs");
+    println!("cargo:rustc-cfg=pyo3_dll_codegen");
 }
 
 fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
@@ -264,16 +246,17 @@ fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
         .lib_name()
         .ok_or("attempted to link to Python shared library but config does not contain lib_name")?;
 
-    if should_use_raw_dylib_linking(lib_name) {
-        // Use raw-dylib linking: emit a cfg so that `extern_libpython!` picks the
-        // right `#[link(name = "...", kind = "raw-dylib")]` attribute at compile time.
+    if should_use_raw_dylib_linking() {
+        // Use raw-dylib linking: generate an `extern_libpython!` macro specialized to
+        // the detected DLL name so that it expands to the right
+        // `#[link(name = "...", kind = "raw-dylib")]` attribute at compile time.
         // This eliminates the need for import libraries (.lib files) entirely.
         //
         // Note: raw-dylib is inherently dynamic linking. Static embedding of the
         // Python interpreter on Windows is not supported by this path (and is not
         // officially supported by CPython on Windows).
         println!("cargo:rustc-cfg=pyo3_use_raw_dylib");
-        println!("cargo:rustc-cfg=pyo3_dll=\"{lib_name}\"");
+        emit_extern_libpython_macro(lib_name);
         return Ok(());
     }
 

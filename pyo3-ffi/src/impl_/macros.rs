@@ -240,75 +240,50 @@ macro_rules! extern_libpython_items {
     };
 }
 
+// Helper macro to declare `extern` blocks that link against libpython on Windows
+// using `raw-dylib`, eliminating the need for import libraries.
+//
+// The target DLL name is detected at build time, but `#[link(name = "...")]`
+// requires a string literal, so a specialized macro definition is generated:
+//
+// - Cargo builds: `pyo3-ffi/build.rs` writes it to `$OUT_DIR/extern_libpython_link.rs`.
+// - Meson builds: `pyo3-ffi/meson.build` writes it to `$OUT_DIR` when `OUT_DIR`
+//   is provided by the build environment.
+//
+// Both set the `pyo3_dll_codegen` cfg to include the generated definition below.
+// This supports any DLL name, including future Python versions, without a
+// hard-coded list of names.
+//
+// # Usage
+//
+// ```rust,ignore
+// // Default ABI "C" (most common):
+// extern_libpython! {
+//     pub fn PyObject_Call(
+//         callable: *mut PyObject,
+//         args: *mut PyObject,
+//         kwargs: *mut PyObject,
+//     ) -> *mut PyObject;
+// }
+//
+// // Explicit ABI:
+// extern_libpython! { "C-unwind" {
+//     pub fn PyGILState_Ensure() -> PyGILState_STATE;
+// }}
+// ```
+#[cfg(pyo3_dll_codegen)]
+include!(concat!(env!("OUT_DIR"), "/extern_libpython_link.rs"));
+
 /// Helper macro to declare `extern` blocks that link against libpython on Windows
 /// using `raw-dylib`, eliminating the need for import libraries.
 ///
-/// The build script sets a `pyo3_dll` cfg value to the target DLL name (e.g. `python312`),
-/// and this macro expands to the appropriate `#[link(name = "...", kind = "raw-dylib")]`
-/// attribute for that DLL.
-///
-/// # Usage
-///
-/// ```rust,ignore
-/// // Default ABI "C" (most common):
-/// extern_libpython! {
-///     pub fn PyObject_Call(
-///         callable: *mut PyObject,
-///         args: *mut PyObject,
-///         kwargs: *mut PyObject,
-///     ) -> *mut PyObject;
-/// }
-///
-/// // Explicit ABI:
-/// extern_libpython! { "C-unwind" {
-///     pub fn PyGILState_Ensure() -> PyGILState_STATE;
-/// }}
-/// ```
+/// This is the fallback definition used when `pyo3_dll_codegen` is not set:
+/// non-Windows builds emit no `#[link]` attribute, and Windows builds without
+/// raw-dylib linking link the `pythonXY` alias (renamed by the build script).
+#[cfg(not(pyo3_dll_codegen))]
 macro_rules! extern_libpython {
     // Explicit ABI
     ($abi:literal { $($body:tt)* }) => {
-        extern_libpython!(@impl $abi { $($body)* }
-            // abi3
-            "python3", "python3_d",
-            // abi3t
-            "python3t", "python3t_d",
-            // Python 3.9 - 3.15
-            "python39", "python39_d",
-            "python310", "python310_d",
-            "python311", "python311_d",
-            "python312", "python312_d",
-            "python313", "python313_d",
-            "python314", "python314_d",
-            "python315", "python315_d",
-            "python316", "python316_d",
-            // free-threaded builds (3.13+)
-            "python313t", "python313t_d",
-            "python314t", "python314t_d",
-            "python315t", "python315t_d",
-            "python316t", "python316t_d",
-            // PyPy (DLL is libpypy3.X-c.dll, not pythonXY.dll)
-            "libpypy3.11-c",
-            "libpypy3.12-c",
-            "libpypy3.13-c",
-            // GraalPy DLL
-            "python-native",
-        );
-    };
-    // Internal: generate cfg_attr for each DLL name. One of these will be selected
-    // by `pyo3-ffi`'s `build.rs`.
-    //
-    // On x86 Windows, Python DLLs export undecorated symbol names (no leading
-    // underscore), but the default for raw-dylib on x86 is fully-decorated
-    // (cdecl adds a `_` prefix). We use `import_name_type = "undecorated"` to
-    // match. The `import_name_type` key is only valid on x86, so we need
-    // separate cfg_attr arms per architecture.
-    (@impl $abi:literal { $($body:tt)* } $($dll:literal),* $(,)?) => {
-        $(
-            #[cfg_attr(all(windows, pyo3_use_raw_dylib, target_arch = "x86", pyo3_dll = $dll),
-                link(name = $dll, kind = "raw-dylib", import_name_type = "undecorated"))]
-            #[cfg_attr(all(windows, pyo3_use_raw_dylib, not(target_arch = "x86"), pyo3_dll = $dll),
-                link(name = $dll, kind = "raw-dylib"))]
-        )*
         #[cfg_attr(all(windows, not(pyo3_use_raw_dylib)), link(name = "pythonXY"))]
         unsafe extern $abi {
             extern_libpython_items! { $($body)* }
