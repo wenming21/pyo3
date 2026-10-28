@@ -38,6 +38,11 @@ fn configure_pyo3() -> Result<()> {
     ensure_auto_initialize_ok(interpreter_config)?;
 
     for cfg in interpreter_config.build_script_outputs() {
+        // Also register `Py_3_*` cfgs which fall outside the range known to this
+        // PyO3 release, so that building against a newer Python does not warn.
+        if let Some(version) = cfg.strip_prefix("cargo:rustc-cfg=Py_3_") {
+            println!("cargo:rustc-check-cfg=cfg(Py_3_{version})");
+        }
         println!("{cfg}")
     }
 
