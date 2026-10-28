@@ -16,7 +16,9 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-benchmark"]
+# pytest 9.2 removed `Node._nodeid`, which pytest-benchmark (including the
+# latest 5.3 release) still accesses.
+dev = ["pytest<9.2", "pytest-benchmark"]
 
 [tool.pytest.ini_options]
 addopts = "--benchmark-disable"

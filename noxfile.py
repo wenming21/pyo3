@@ -1693,7 +1693,8 @@ def test_introspection(session: nox.Session):
         session.install("maturin")
         session.install("ruff")
         # `pytest-benchmark` backs the `--benchmark-disable` in `pytests/pyproject.toml`
-        session.install("pytest", "pytest-benchmark")
+        # and does not support pytest 9.2's removal of `Node._nodeid` yet
+        session.install("pytest<9.2", "pytest-benchmark")
         options = []
         target = os.environ.get("CARGO_BUILD_TARGET")
         if target is not None:
