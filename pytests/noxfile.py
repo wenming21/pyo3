@@ -19,7 +19,7 @@ def test(session: nox.Session):
     session.env["MATURIN_PEP517_ARGS"] = "--profile=dev"
     if args.features:
         session.env["MATURIN_PEP517_ARGS"] += f" --features={args.features}"
-    session.install("-v", ".[dev]")
+    session.install("-v", ".[dev]", "pytest<9.2")
 
     def try_install_binary(package: str, constraint: str):
         try:
@@ -52,7 +52,7 @@ def test(session: nox.Session):
 
 @nox.session
 def bench(session: nox.Session):
-    session.install(".[dev]")
+    session.install(".[dev]", "pytest<9.2")
     session.run("pytest", "--benchmark-enable", "--benchmark-only", *session.posargs)
 
 
