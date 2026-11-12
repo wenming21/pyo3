@@ -1,18 +1,12 @@
 use pyo3_build_config::{
     InterpreterConfig, PythonAbiKind, PythonImplementation, PythonVersion, StableAbi, bail, ensure,
     pyo3_build_script_impl::{
-        BuildConfig, BuildConfigSource, MaximumVersionExceeded, cargo_env_var, env_var,
-        errors::Result, is_linking_libpython_for_target, print_feature_cfgs,
-        print_libpython_rpath_link_args, resolve_build_config, target_triple_from_env,
+        BuildConfig, BuildConfigSource, cargo_env_var, env_var, errors::Result,
+        is_linking_libpython_for_target, print_feature_cfgs, print_libpython_rpath_link_args,
+        resolve_build_config, target_triple_from_env,
     },
     warn,
 };
-
-/// Minimum Python version PyO3 supports.
-struct SupportedVersions {
-    min: PythonVersion,
-    max: PythonVersion,
-}
 
 const PY_3_9: PythonVersion = PythonVersion { major: 3, minor: 9 };
 const PY_3_10: PythonVersion = PythonVersion {
@@ -36,20 +30,9 @@ const PY_3_15: PythonVersion = PythonVersion {
     minor: 15,
 };
 
-const SUPPORTED_VERSIONS_CPYTHON: SupportedVersions = SupportedVersions {
-    min: PY_3_9,
-    max: PY_3_15,
-};
-
-const SUPPORTED_VERSIONS_PYPY: SupportedVersions = SupportedVersions {
-    min: PY_3_11,
-    max: SUPPORTED_VERSIONS_CPYTHON.max,
-};
-
-const SUPPORTED_VERSIONS_GRAALPY: SupportedVersions = SupportedVersions {
-    min: PY_3_10,
-    max: SUPPORTED_VERSIONS_CPYTHON.max,
-};
+const MIN_SUPPORTED_VERSION_CPYTHON: PythonVersion = PY_3_9;
+const MIN_SUPPORTED_VERSION_PYPY: PythonVersion = PY_3_11;
+const MIN_SUPPORTED_VERSION_GRAALPY: PythonVersion = PY_3_10;
 
 const MIN_FREE_THREADED_VERSION: PythonVersion = PY_3_14;
 
@@ -62,67 +45,22 @@ fn ensure_python_version(interpreter_config: &InterpreterConfig) -> Result<()> {
 
     let implementation = interpreter_config.target_abi().implementation();
 
-    let supported_versions = match implementation {
-        PythonImplementation::CPython => SUPPORTED_VERSIONS_CPYTHON,
-        PythonImplementation::PyPy => SUPPORTED_VERSIONS_PYPY,
-        PythonImplementation::GraalPy => SUPPORTED_VERSIONS_GRAALPY,
+    let min_supported_version = match implementation {
+        PythonImplementation::CPython => MIN_SUPPORTED_VERSION_CPYTHON,
+        PythonImplementation::PyPy => MIN_SUPPORTED_VERSION_PYPY,
+        PythonImplementation::GraalPy => MIN_SUPPORTED_VERSION_GRAALPY,
         PythonImplementation::RustPython => {
             // We don't yet check anything for RustPython
             return Ok(());
         }
     };
 
-    let interp_version = interpreter_config.target_abi().version();
     ensure!(
-        interpreter_config.version() >= supported_versions.min,
+        interpreter_config.version() >= min_supported_version,
         "the configured Python interpreter version ({}) is lower than PyO3's minimum supported version ({})",
         interpreter_config.version(),
-        supported_versions.min,
+        min_supported_version,
     );
-    let expected_next_version = PythonVersion {
-        major: supported_versions.max.major,
-        minor: supported_versions.max.minor + 1,
-    };
-    if interp_version == expected_next_version {
-        warn!(
-            "Using experimental support for the {implementation} {}.{} ABI. \
-             Build artifacts may not be compatible with the final release of {implementation}, \
-             so do not distribute them.",
-            expected_next_version.major, expected_next_version.minor,
-        );
-    } else if interp_version > expected_next_version {
-        let mut error = MaximumVersionExceeded::new(interpreter_config, supported_versions.max);
-        if interpreter_config.target_abi().kind().is_free_threaded()
-            && implementation == PythonImplementation::CPython
-        {
-            if interp_version >= PY_3_15 {
-                if env_var("PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY")
-                    .is_none_or(|os_str| os_str != "1")
-                {
-                    error.add_help(
-                        "set PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1 to suppress this check and build anyway using the free-threaded stable ABI"
-                    );
-                    return Err(error.finish().into());
-                }
-            } else {
-                error.add_help(format!(
-                    "the free-threaded build of CPython {}.{} does not support the limited API so this check cannot be suppressed.", interp_version.major, interp_version.minor
-                ).as_str());
-                return Err(error.finish().into());
-            }
-        }
-        // Only CPython and PyPy support the stable ABI
-        if matches!(
-            implementation,
-            PythonImplementation::CPython | PythonImplementation::PyPy
-        ) && env_var("PYO3_USE_ABI3_FORWARD_COMPATIBILITY").is_none_or(|os_str| os_str != "1")
-            && env_var("PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY")
-                .is_none_or(|os_str| os_str != "1")
-        {
-            error.add_help("set PYO3_USE_STABLE_ABI_FORWARD_COMPATIBILITY=1 to suppress this check and build anyway using the stable ABI");
-            return Err(error.finish().into());
-        }
-    }
 
     if interpreter_config.target_abi().kind().is_free_threaded() {
         ensure!(
@@ -190,70 +128,62 @@ fn ensure_target_pointer_width(interpreter_config: &InterpreterConfig) -> Result
     Ok(())
 }
 
-/// `raw-dylib` currently does not support arbitrary names
-/// (see https://internals.rust-lang.org/t/support-renames-with-link-name-kind-raw-dylib/24415)
-/// so if the lib name is not one of the known subset, we must fall back to full linking.
-fn lib_name_is_known_for_raw_dylib(lib_name: &str) -> bool {
-    if matches!(
-        lib_name,
-        // pyo3_dll cfg for raw-dylib linking on Windows
-        "python3" | "python3_d" | "python3t" | "python3t_d"
-        // GraalPy DLL name
-        | "python-native"
-    ) {
-        return true;
-    }
-
-    // support raw-dylib linking for all CPython versions supported, plus the next prerelease
-    for i in SUPPORTED_VERSIONS_CPYTHON.min.minor..=SUPPORTED_VERSIONS_CPYTHON.max.minor + 1 {
-        if lib_name == format!("python3{i}") || lib_name == format!("python3{i}_d") {
-            return true;
-        }
-        if i >= 13 && (lib_name == format!("python3{i}t") || lib_name == format!("python3{i}t_d")) {
-            return true;
-        }
-    }
-    // PyPy DLL names (libpypy3.X-c.dll)
-    for i in SUPPORTED_VERSIONS_PYPY.min.minor..=SUPPORTED_VERSIONS_PYPY.max.minor {
-        if lib_name == format!("libpypy3.{i}-c") {
-            return true;
-        }
-    }
-
-    false
-}
-
 /// Whether to use raw-dylib linking.
 ///
 /// Currently, this only applies if all of the following are true:
 /// - The target OS is Windows.
-/// - The Python library name is one of the [known subset][lib_name_is_known_for_raw_dylib].
 /// - The `PYO3_USE_RAW_DYLIB` environment variable is not set, or is set to `1`.
 ///
 /// NB in some cases (e.g. mixed C / Rust builds) it might be necessary to link the full Python
 /// library rather than rely on the symbols which PyO3 defines as raw-dylib, which is why
 /// we have the opt-out env var.
-fn should_use_raw_dylib_linking(lib_name: &str) -> bool {
+fn should_use_raw_dylib_linking() -> bool {
     let target_os = cargo_env_var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os != "windows" {
         return false;
     }
 
-    match (
-        lib_name_is_known_for_raw_dylib(lib_name),
-        env_var("PYO3_USE_RAW_DYLIB"),
-    ) {
-        (true, None) => true,
-        (true, Some(os_str)) if os_str == "1" => true,
-        (false, Some(os_str)) if os_str == "1" => {
-            warn!(
-                "PYO3_USE_RAW_DYLIB is set to 1 but the Python library name is not recognized. \
-                Falling back to full linking."
-            );
-            false
-        }
+    match env_var("PYO3_USE_RAW_DYLIB") {
+        None => true,
+        Some(os_str) if os_str == "1" => true,
         _ => false,
     }
+}
+
+/// Writes a small `macro_rules!` definition which expands to the `raw-dylib`
+/// `#[link]` attribute for the detected Python library name.
+///
+/// `#[link(name = ...)]` requires a string literal, so the name cannot be passed
+/// through a `cfg` value. Generating the attribute at build time lets PyO3 support
+/// any Python DLL name, including DLLs of Python versions released after this
+/// version of PyO3, without maintaining a hard-coded list.
+fn write_raw_dylib_link_macro(lib_name: &str) -> Result<()> {
+    let lib_name = lib_name.replace('\\', "\\\\").replace('"', "\\\"");
+    let out_dir =
+        std::env::var_os("OUT_DIR").ok_or("OUT_DIR environment variable is not set by cargo")?;
+    let path = std::path::Path::new(&out_dir).join("pyo3_raw_dylib_link.rs");
+    let contents = format!(
+        "\
+#[allow(unused_macros)]
+macro_rules! pyo3_raw_dylib {{
+    ($abi:literal {{ $($body:tt)* }}) => {{
+        #[cfg_attr(target_arch = \"x86\", link(name = \"{lib_name}\", kind = \"raw-dylib\", import_name_type = \"undecorated\"))]
+        #[cfg_attr(not(target_arch = \"x86\"), link(name = \"{lib_name}\", kind = \"raw-dylib\"))]
+        unsafe extern $abi {{
+            extern_libpython_items! {{ $($body)* }}
+        }}
+    }};
+}}
+"
+    );
+    std::fs::write(&path, contents).map_err(|err| {
+        format!(
+            "failed to write raw-dylib link attribute to {}: {err}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
@@ -264,7 +194,7 @@ fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
         .lib_name()
         .ok_or("attempted to link to Python shared library but config does not contain lib_name")?;
 
-    if should_use_raw_dylib_linking(lib_name) {
+    if should_use_raw_dylib_linking() {
         // Use raw-dylib linking: emit a cfg so that `extern_libpython!` picks the
         // right `#[link(name = "...", kind = "raw-dylib")]` attribute at compile time.
         // This eliminates the need for import libraries (.lib files) entirely.
@@ -350,6 +280,10 @@ fn configure_pyo3_ffi() -> Result<()> {
     ensure_python_version(interpreter_config)?;
     ensure_target_pointer_width(interpreter_config)?;
 
+    // Always emit the raw-dylib link attribute so that the `include!` in
+    // `impl_/macros.rs` works even when raw-dylib linking is not used for this target.
+    write_raw_dylib_link_macro(interpreter_config.lib_name().unwrap_or("python3"))?;
+
     // Serialize the whole interpreter config into DEP_PYTHON_PYO3_CONFIG env var.
     interpreter_config.to_cargo_dep_env()?;
 
@@ -360,6 +294,11 @@ fn configure_pyo3_ffi() -> Result<()> {
     }
 
     for cfg in interpreter_config.build_script_outputs() {
+        // Also register `Py_3_*` cfgs which fall outside the range known to this
+        // PyO3 release, so that building against a newer Python does not warn.
+        if let Some(version) = cfg.strip_prefix("cargo:rustc-cfg=Py_3_") {
+            println!("cargo:rustc-check-cfg=cfg(Py_3_{version})");
+        }
         println!("{cfg}")
     }
 

@@ -8,8 +8,7 @@ project(
 
 MINIMUM_SUPPORTED_VERSION_MINOR = 8
 STABLE_ABI_MAX_MINOR = 15
-MINIMUM_SUPPORTED_VERSION_PYPY_MINOR = 11
-MAXIMUM_SUPPORTED_VERSION_PYPY_MINOR = 11
+
 
 extra_args = []
 
@@ -29,32 +28,10 @@ foreach i : range(MINIMUM_SUPPORTED_VERSION_MINOR, STABLE_ABI_MAX_MINOR + 2)
   extra_args += ['--check-cfg', f'cfg(Py_3_@i@)']
 endforeach
 
-# Allow all possible 'pyo3_dll' cfg values for raw-dylib linking on Windows.
-dll_names = ['python3', 'python3_d', 'python3t', 'python3t_d']
-
-foreach i : range(MINIMUM_SUPPORTED_VERSION_MINOR, STABLE_ABI_MAX_MINOR + 2)
-  # CPython DLL names.
-  dll_names += [f'python3@i@', f'python3@i@_d']
-  if i >= 13
-    dll_names += [f'python3@i@t', f'python3@i@t_d']
-  endif
-endforeach
-
-foreach i : range(MINIMUM_SUPPORTED_VERSION_PYPY_MINOR, MAXIMUM_SUPPORTED_VERSION_PYPY_MINOR + 2)
-  # PyPy DLL names.
-  dll_names += [f'libpypy3.@i@-c']
-endforeach
-
-# GraalPy DLL name
-dll_names += ['python-native']
-
-dll_names_quoted = []
-foreach name : dll_names
-  dll_names_quoted += f'"@name@"'
-endforeach
-
-pyo3_dll_values = ', '.join(dll_names_quoted)
-extra_args += ['--check-cfg', f'cfg(pyo3_dll, values(@pyo3_dll_values@))']
+# `pyo3_dll` carries the detected Python DLL name (for example `python312`,
+# `libpypy3.12-c` or `python-native`). Accept any value so that DLLs of future
+# Python versions do not need a hard-coded list.
+extra_args += ['--check-cfg', 'cfg(pyo3_dll, values(any()))']
 
 
 fs = import('fs')
@@ -158,6 +135,7 @@ foreach flag : ['Py_DEBUG', 'Py_REF_DEBUG', 'Py_TRACE_REFS', 'COUNT_ALLOCS']
 endforeach
 
 
+raw_dylib_lib_name = 'python3'
 if is_windows
   # Windows: extension modules need to link to libpython.
   if is_pypy
@@ -167,8 +145,50 @@ if is_windows
   else
     py_lib_name = 'python' + abi + (py_debug ? '_d' : '')
   endif
+  raw_dylib_lib_name = py_lib_name
   extra_args += ['--cfg', 'pyo3_use_raw_dylib', '--cfg', f'pyo3_dll="@py_lib_name@"']
 endif
+
+
+# Generate the `#[link(name = ...)]` attribute for the detected DLL name.
+# `#[link]` requires a string literal, so the attribute is generated instead of
+# being selected from a hard-coded list of known DLL names.
+#
+# Meson cannot provide cargo's compile-time environment variables to rustc, so
+# `pyo3-ffi`'s source includes the generated attribute from the source tree when
+# this cfg is set. See `pyo3-ffi/src/impl_/macros.rs`.
+extra_args += ['--check-cfg', 'cfg(pyo3_ffi_meson)', '--cfg', 'pyo3_ffi_meson']
+
+
+# Write the generated attribute into the source tree, next to `macros.rs`; that
+# is the path used by the `include!` guarded by `pyo3_ffi_meson`.
+raw_dylib_out_dir = meson.current_source_dir() / 'src' / 'impl_'
+run_command(
+  py,
+  '-c',
+  '''
+import os, sys
+out_dir, lib_name = sys.argv[1], sys.argv[2]
+os.makedirs(out_dir, exist_ok=True)
+contents = """
+#[allow(unused_macros)]
+macro_rules! pyo3_raw_dylib {
+    ($abi:literal { $($body:tt)* }) => {
+        #[cfg_attr(target_arch = "x86", link(name = "LIBNAME", kind = "raw-dylib", import_name_type = "undecorated"))]
+        #[cfg_attr(not(target_arch = "x86"), link(name = "LIBNAME", kind = "raw-dylib"))]
+        unsafe extern $abi {
+            extern_libpython_items! { $($body)* }
+        }
+    };
+}
+""".replace("LIBNAME", lib_name)
+with open(os.path.join(out_dir, "pyo3_raw_dylib_link.rs"), "w", encoding="utf-8") as f:
+    f.write(contents)
+''',
+  raw_dylib_out_dir,
+  raw_dylib_lib_name,
+  check : true,
+)
 
 
 # Compiler features used by PyO3.
