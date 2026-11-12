@@ -1,7 +1,7 @@
 # PyO3
 
 [![actions status](https://img.shields.io/github/actions/workflow/status/PyO3/pyo3/ci.yml?branch=main&logo=github&style=)](https://github.com/PyO3/pyo3/actions)
-[![benchmark](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://codspeed.io/PyO3/pyo3)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/wenming21/pyo3?utm_source=badge)
 [![codecov](https://img.shields.io/codecov/c/gh/PyO3/pyo3?logo=codecov)](https://codecov.io/gh/PyO3/pyo3)
 [![crates.io](https://img.shields.io/crates/v/pyo3?logo=rust)](https://crates.io/crates/pyo3)
 [![minimum rustc](https://img.shields.io/badge/dynamic/json?url=https://crates.io/api/v1/crates/pyo3&query=$.versions[0].rust_version&label=rustc&suffix=%2B&color=blue&logo=rust)](https://rust-lang.github.io/rfcs/2495-min-rust-version.html)

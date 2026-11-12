@@ -21,6 +21,9 @@ permissions:
 jobs:
   benchmarks:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # required for OIDC authentication with CodSpeed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,8 +57,7 @@ jobs:
           tool: cargo-codspeed
 
       - name: Run the benchmarks
-        uses: CodSpeedHQ/action@78102a468f96d8e0ccb92d0ec49425753fc42062 # v5.6.0
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         with:
           run: uv run --isolated --only-group nox nox -s codspeed
-          token: ${{ secrets.CODSPEED_TOKEN }}
           mode: simulation
