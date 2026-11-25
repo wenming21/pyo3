@@ -205,11 +205,13 @@ about this topic.
 - [fastuuid](https://github.com/thedrow/fastuuid/) _Python bindings to Rust's UUID library._
 - [fast-paseto](https://github.com/CodingCogs-OSS/Fast-Paseto) _High-performance PASETO (Platform-Agnostic Security Tokens) implementation with Python bindings._
 - [feos](https://github.com/feos-org/feos) _Lightning fast thermodynamic modeling in Rust with fully developed Python interface._
+- [fin-primitives](https://github.com/Mattbusel/fin-primitives/tree/main/python) _743 trading indicators (RSI, EMA, MACD, ATR, Bollinger) in exact decimal arithmetic, with numpy, pandas and Polars support._
 - [finalytics](https://github.com/Nnamdi-sys/finalytics) _Investment Analysis library in Rust | Python._
 - [forust](https://github.com/jinlow/forust) _A lightweight gradient boosted decision tree library written in Rust._
 - [geo-index](https://github.com/kylebarron/geo-index) _A Rust crate and [Python library](https://github.com/kylebarron/geo-index/tree/main/python) for packed, immutable, zero-copy spatial indexes._
 - [granian](https://github.com/emmett-framework/granian) _A Rust HTTP server for Python applications._
 - [haem](https://github.com/BooleanCat/haem) _A Python library for working on Bioinformatics problems._
+- [harper-py](https://github.com/Maksim-Burtsev/harper-py) _Python bindings for [Harper](https://github.com/Automattic/harper), an offline English grammar checker._
 - [hifitime](https://github.com/nyx-space/hifitime) _A high fidelity time management library for engineering and scientific applications where general relativity and time dilation matter._
 - [html2text-rs](https://github.com/deedy5/html2text_rs) _Python library for converting HTML to markup or plain text._
 - [html-py-ever](https://github.com/PyO3/setuptools-rust/tree/main/examples/html-py-ever) _Using [html5ever](https://github.com/servo/html5ever) through [kuchiki](https://github.com/kuchiki-rs/kuchiki) to speed up html parsing and css-selecting._
@@ -227,6 +229,7 @@ about this topic.
 - [polars](https://github.com/pola-rs/polars) _Fast multi-threaded DataFrame library in Rust | Python | Node.js._
 - [pycrdt](https://github.com/jupyter-server/pycrdt) _Python bindings for the Rust CRDT implementation [Yrs](https://github.com/y-crdt/y-crdt)._
 - [pydantic-core](https://github.com/pydantic/pydantic-core) _Core validation logic for pydantic written in Rust._
+- [pygrpc-native](https://github.com/pygrpc/pygrpc-native) _A drop-in Python gRPC server that handles HTTP/2 in Rust, outside the GIL._
 - [primp](https://github.com/deedy5/primp) _The fastest python HTTP client that can impersonate web browsers by mimicking their headers and TLS/JA3/JA4/HTTP2 fingerprints._
 - [pyro-mysql](https://github.com/elbaro/pyro-mysql) _A high-performance MySQL driver for Python._
 - [pyro-postgres](https://github.com/elbaro/pyro-postgres) _A high-performance PostgreSQL driver for Python._
