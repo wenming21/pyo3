@@ -17,7 +17,6 @@ import argparse
 import os
 import statistics
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -45,7 +44,7 @@ def cargo_build(features: str | None) -> float:
         command.extend(["--features", features])
     started = time.perf_counter()
     process = subprocess.run(
-        command, cwd=ROOT, env=env, capture_output=True, text=True
+        command, check=False, cwd=ROOT, env=env, capture_output=True, text=True
     )
     elapsed = time.perf_counter() - started
     if process.returncode != 0:

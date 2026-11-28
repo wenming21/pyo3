@@ -59,15 +59,14 @@ def expected_lib_name(*, abi3: bool = False) -> str:
     return name
 
 
-def run_cargo(
-    *extra_args: str, env: dict[str, str] | None = None
-) -> tuple[int, str]:
+def run_cargo(*extra_args: str, env: dict[str, str] | None = None) -> tuple[int, str]:
     full_env = os.environ.copy()
     full_env["CARGO_TERM_COLOR"] = "never"
     if env:
         full_env.update(env)
     process = subprocess.run(
         ["cargo", "build", "-p", "pyo3-ffi", *extra_args],
+        check=False,
         cwd=ROOT,
         env=full_env,
         capture_output=True,
@@ -141,14 +140,14 @@ def check_enabled_path() -> None:
         f"detected name {decision['name']!r} != expected {expected!r}",
     )
     check(decision["tool"] == "cargo", "decision log does not report tool=cargo")
-    check(decision["source"] == "detected", "decision log does not report source=detected")
+    check(
+        decision["source"] == "detected", "decision log does not report source=detected"
+    )
     print(f"ok: auto-detect name {decision['name']} (cargo)")
 
 
 def check_conflict() -> None:
-    code, output = run_cargo(
-        "--features", "auto-detect-python-lib generate-import-lib"
-    )
+    code, output = run_cargo("--features", "auto-detect-python-lib generate-import-lib")
     check(code == 0, "feature conflict build must not fail:\n" + output)
     check(
         "generate-import-lib is disabled" in output,
@@ -184,6 +183,7 @@ def print_config() -> str:
     env["CARGO_TERM_COLOR"] = "never"
     process = subprocess.run(
         ["cargo", "build", "-p", "pyo3-ffi"],
+        check=False,
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -205,9 +205,7 @@ def check_explicit_config() -> None:
         if stripped.startswith("lib_name="):
             lines.append("lib_name=python310")
             replaced = True
-        elif stripped.startswith("-- PYO3_PRINT_CONFIG"):
-            continue
-        elif stripped.startswith("note:"):
+        elif stripped.startswith(("-- PYO3_PRINT_CONFIG", "note:")):
             continue
         elif stripped:
             lines.append(stripped)
