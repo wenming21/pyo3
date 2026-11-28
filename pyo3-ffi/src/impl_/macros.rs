@@ -303,13 +303,17 @@ macro_rules! extern_libpython {
     // match. The `import_name_type` key is only valid on x86, so we need
     // separate cfg_attr arms per architecture.
     (@impl $abi:literal { $($body:tt)* } $($dll:literal),* $(,)?) => {
+        #[cfg(any(pyo3_auto_detect_out_dir = "out-dir", pyo3_auto_detect_out_dir = "meson"))]
+        pyo3_auto_detect_extern! { $abi { $($body)* } }
+
+        #[cfg(not(any(pyo3_auto_detect_out_dir = "out-dir", pyo3_auto_detect_out_dir = "meson")))]
         $(
             #[cfg_attr(all(windows, pyo3_use_raw_dylib, target_arch = "x86", pyo3_dll = $dll),
                 link(name = $dll, kind = "raw-dylib", import_name_type = "undecorated"))]
             #[cfg_attr(all(windows, pyo3_use_raw_dylib, not(target_arch = "x86"), pyo3_dll = $dll),
                 link(name = $dll, kind = "raw-dylib"))]
         )*
-        #[cfg_attr(all(windows, not(pyo3_use_raw_dylib)), link(name = "pythonXY"))]
+        #[cfg_attr(all(windows, not(pyo3_use_raw_dylib), not(pyo3_use_auto_detect_lib)), link(name = "pythonXY"))]
         unsafe extern $abi {
             extern_libpython_items! { $($body)* }
         }
@@ -318,4 +322,67 @@ macro_rules! extern_libpython {
     ($($body:tt)*) => {
         extern_libpython!("C" { $($body)* });
     };
+}
+#[cfg(all(test, not(PyPy)))]
+mod tests {
+    use alloc::collections::BTreeSet;
+    use alloc::vec::Vec;
+
+    use pyo3_build_config::raw_dylib_name_candidates;
+
+    const MACROS_SRC: &str = include_str!("macros.rs");
+    const ROOT_CARGO_TOML: &str = include_str!("../../../Cargo.toml");
+
+    fn quoted_names(block: &str) -> BTreeSet<&str> {
+        block
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn candidate_lists_match_raw_dylib_name_candidates() {
+        let start = MACROS_SRC
+            .find("// abi3")
+            .expect("candidate list marker `// abi3` missing from macros.rs");
+        let end = MACROS_SRC[start..]
+            .find(");")
+            .expect("candidate list terminator `);` missing from macros.rs")
+            + start;
+        let macro_candidates = quoted_names(&MACROS_SRC[start..end]);
+
+        let lint_line = ROOT_CARGO_TOML
+            .lines()
+            .find(|line| line.contains("'cfg(pyo3_dll, values("))
+            .expect("`cfg(pyo3_dll, values(...))` missing from workspace lints");
+        let lint_values = lint_line
+            .split("values(")
+            .nth(1)
+            .expect("`values(...)` missing from pyo3_dll lint")
+            .split(')')
+            .next()
+            .expect("unterminated `values(...)` in pyo3_dll lint");
+        let lint_candidates = quoted_names(lint_values);
+
+        let expected: BTreeSet<&str> = raw_dylib_name_candidates().iter().copied().collect();
+
+        assert_eq!(
+            macro_candidates,
+            expected,
+            "macros.rs `extern_libpython!` candidates differ from `raw_dylib_name_candidates()`; \
+             missing: {:?}, unexpected: {:?}",
+            expected.difference(&macro_candidates).collect::<Vec<_>>(),
+            macro_candidates.difference(&expected).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            lint_candidates,
+            expected,
+            "workspace `pyo3_dll` lint values differ from `raw_dylib_name_candidates()`; \
+             missing: {:?}, unexpected: {:?}",
+            expected.difference(&lint_candidates).collect::<Vec<_>>(),
+            lint_candidates.difference(&expected).collect::<Vec<_>>(),
+        );
+    }
 }

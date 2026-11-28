@@ -250,6 +250,23 @@ In these cases, setting `PYO3_USE_RAW_DYLIB=0` can be used to disable `raw-dylib
 > [!NOTE]
 > Historically PyO3 used a `generate-import-lib` feature which needed external machinery to achieve the same result of `raw-dylib` linking.
 
+### Automatic Python library name detection
+
+The `auto-detect-python-lib` cargo feature makes PyO3 derive the Python shared library name from the target and interpreter configuration (version, implementation, debug and free-threaded flags, stable ABI, MinGW, PyPy, and GraalPy) instead of enumerating DLL names.
+It supports Linux, Windows, and macOS, with both Cargo and Meson builds.
+
+- Enabling the feature disables the enumerated DLL name path.
+- An explicit `lib_name` in `PYO3_CONFIG_FILE` takes priority.
+- `generate-import-lib` is ignored with a warning in this mode.
+- If the name cannot be determined, PyO3 falls back to full linking and the build still succeeds.
+- When the feature is disabled (the default), the previous build behavior is unchanged.
+
+The build script prints a single decision log line, for example:
+
+```text
+[pyo3] auto-detect-python-lib: lib_name=python310 target=x86_64-pc-windows-msvc tool=cargo source=detected raw_dylib_eligible=true reason=-
+```
+
 ### `Py_LIMITED_API`/`abi3`/`abi3t`
 
 By default, Python extension modules can only be used with the same Python version they were compiled against.

@@ -1,9 +1,10 @@
 use pyo3_build_config::{
-    InterpreterConfig, PythonAbiKind, PythonImplementation, PythonVersion, StableAbi, bail, ensure,
+    AutoDetectMode, BuildTool, InterpreterConfig, LibNameDecision, LibNameSource, PythonAbiKind,
+    PythonImplementation, PythonVersion, StableAbi, Triple, bail, decide_lib_name, ensure,
     pyo3_build_script_impl::{
         BuildConfig, BuildConfigSource, MaximumVersionExceeded, cargo_env_var, env_var,
         errors::Result, is_linking_libpython_for_target, print_feature_cfgs,
-        print_libpython_rpath_link_args, resolve_build_config, target_triple_from_env,
+        print_libpython_rpath_link_args, resolve_build_config_with_mode, target_triple_from_env,
     },
     warn,
 };
@@ -331,6 +332,124 @@ fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
     Ok(())
 }
 
+fn auto_detect_mode() -> AutoDetectMode {
+    if env_var("CARGO_FEATURE_AUTO_DETECT_PYTHON_LIB").is_some() {
+        AutoDetectMode::Enabled
+    } else {
+        AutoDetectMode::Disabled
+    }
+}
+
+fn auto_detect_allows_raw_dylib() -> bool {
+    env_var("PYO3_USE_RAW_DYLIB").is_none_or(|value| value != "0")
+}
+
+fn lib_name_source_name(source: LibNameSource) -> &'static str {
+    match source {
+        LibNameSource::Configured => "configured",
+        LibNameSource::Detected => "detected",
+        LibNameSource::Enumerated => "enumerated",
+        LibNameSource::Fallback => "fallback",
+    }
+}
+
+fn log_auto_detect_decision(decision: &LibNameDecision, target: &Triple) {
+    let lib_name = decision.lib_name.as_deref().unwrap_or("<unknown>");
+    let reason = decision.reason.as_deref().unwrap_or("-");
+    println!(
+        "cargo:warning=[pyo3] auto-detect-python-lib: lib_name={lib_name} target={target} tool=cargo source={} raw_dylib_eligible={} reason={reason}",
+        lib_name_source_name(decision.source),
+        decision.raw_dylib_eligible,
+    );
+}
+
+fn write_auto_detect_link_carrier(lib_name: &str) -> Result<()> {
+    let out_dir = env_var("OUT_DIR").ok_or("OUT_DIR is not set for the pyo3-ffi build script")?;
+    let path = std::path::Path::new(&out_dir).join("pyo3_auto_detect_lib.rs");
+
+    let x86 = cargo_env_var("CARGO_CFG_TARGET_ARCH").as_deref() == Some("x86");
+    let link_attribute = if x86 {
+        format!(
+            "#[link(name = \"{lib_name}\", kind = \"raw-dylib\", import_name_type = \"undecorated\")]"
+        )
+    } else {
+        format!("#[link(name = \"{lib_name}\", kind = \"raw-dylib\")]")
+    };
+    let contents = format!(
+        "macro_rules! pyo3_auto_detect_extern {{\n\
+         ($abi:literal {{ $($body:tt)* }}) => {{\n\
+         {link_attribute}\n\
+         unsafe extern $abi {{ extern_libpython_items! {{ $($body)* }} }}\n\
+         }};\n\
+         }}\n"
+    );
+
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(contents.as_str()) {
+        std::fs::write(&path, contents)
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn emit_auto_detect_link_config(
+    build_config: &BuildConfig,
+    decision: &LibNameDecision,
+) -> Result<()> {
+    let interpreter_config = &build_config.interpreter_config;
+    let target_os = cargo_env_var("CARGO_CFG_TARGET_OS").unwrap();
+    let Some(lib_name) = decision.lib_name.as_deref() else {
+        return emit_link_config(build_config);
+    };
+
+    if target_os == "windows" && decision.raw_dylib_eligible && auto_detect_allows_raw_dylib() {
+        write_auto_detect_link_carrier(lib_name)?;
+        println!("cargo:rustc-cfg=pyo3_use_auto_detect_lib");
+        println!("cargo:rustc-cfg=pyo3_auto_detect_out_dir=\"out-dir\"");
+        return Ok(());
+    }
+
+    // Not using raw-dylib linking: PyPy dll needs to be the import library not the DLL name.
+    let lib_name = if interpreter_config.target_abi().implementation() == PythonImplementation::PyPy
+        && target_os == "windows"
+    {
+        format!(
+            "python{}{}",
+            interpreter_config.target_abi().version().major,
+            interpreter_config.target_abi().version().minor
+        )
+    } else {
+        lib_name.to_string()
+    };
+
+    println!(
+        "cargo:rustc-link-lib={link_model}{alias}{lib_name}",
+        link_model = if interpreter_config.shared() {
+            ""
+        } else {
+            "static="
+        },
+        alias = if target_os == "windows" {
+            "pythonXY:"
+        } else {
+            ""
+        }
+    );
+
+    if let Some(lib_dir) = interpreter_config.lib_dir() {
+        println!("cargo:rustc-link-search=native={lib_dir}");
+    } else if matches!(build_config.source, BuildConfigSource::CrossCompile) {
+        warn!(
+            "The output binary will link to libpython, \
+            but PYO3_CROSS_LIB_DIR environment variable is not set. \
+            Ensure that the target Python library directory is \
+            in the rustc native library search path."
+        );
+    }
+
+    Ok(())
+}
+
 /// Prepares the PyO3 crate for compilation.
 ///
 /// This uses pyo3-build-config implementation to detect the target Python interpreter and validate
@@ -340,7 +459,8 @@ fn emit_link_config(build_config: &BuildConfig) -> Result<()> {
 /// version to enable features which aren't supported on MSRV.
 fn configure_pyo3_ffi() -> Result<()> {
     let target = target_triple_from_env();
-    let build_config = resolve_build_config(&target)?;
+    let mode = auto_detect_mode();
+    let build_config = resolve_build_config_with_mode(&target, mode)?;
     let interpreter_config = &build_config.interpreter_config;
 
     if env_var("PYO3_PRINT_CONFIG").is_some_and(|os_str| os_str == "1") {
@@ -356,7 +476,37 @@ fn configure_pyo3_ffi() -> Result<()> {
     if is_linking_libpython_for_target(&target)
         && !interpreter_config.suppress_build_script_link_lines()
     {
-        emit_link_config(&build_config)?;
+        if mode == AutoDetectMode::Enabled {
+            if env_var("CARGO_FEATURE_GENERATE_IMPORT_LIB").is_some() {
+                println!(
+                    "cargo:warning=[pyo3] auto-detect-python-lib is enabled; \
+                     generate-import-lib is disabled and no import library will be generated"
+                );
+            }
+            println!("cargo:rustc-check-cfg=cfg(pyo3_use_auto_detect_lib)");
+            println!(
+                "cargo:rustc-check-cfg=cfg(pyo3_auto_detect_out_dir, values(\"out-dir\", \"meson\"))"
+            );
+            let decision = decide_lib_name(
+                interpreter_config,
+                &target,
+                mode,
+                BuildTool::Cargo,
+                build_config.lib_name_is_explicit,
+            );
+            log_auto_detect_decision(&decision, &target);
+            if cargo_env_var("CARGO_CFG_TARGET_OS").as_deref() == Some("windows")
+                && !auto_detect_allows_raw_dylib()
+            {
+                println!(
+                    "cargo:warning=[pyo3] auto-detect-python-lib: PYO3_USE_RAW_DYLIB=0, \
+                     falling back to full linking"
+                );
+            }
+            emit_auto_detect_link_config(&build_config, &decision)?;
+        } else {
+            emit_link_config(&build_config)?;
+        }
     }
 
     for cfg in interpreter_config.build_script_outputs() {

@@ -13,10 +13,11 @@ mod impl_;
 use std::{env, process::Command, str::FromStr, sync::LazyLock};
 
 pub use impl_::{
-    BuildFlag, BuildFlags, CrossCompileConfig, GilUsed, InterpreterConfig,
-    InterpreterConfigBuilder, PythonAbi, PythonAbiBuilder, PythonAbiKind, PythonImplementation,
-    PythonVersion, StableAbi, Triple, cross_compiling_from_to, find_all_sysconfigdata,
-    parse_sysconfigdata,
+    AutoDetectMode, BuildFlag, BuildFlags, BuildTool, CrossCompileConfig, GilUsed,
+    InterpreterConfig, InterpreterConfigBuilder, LibNameDecision, LibNameSource, PythonAbi,
+    PythonAbiBuilder, PythonAbiKind, PythonImplementation, PythonVersion, StableAbi, Triple,
+    cross_compiling_from_to, decide_lib_name, find_all_sysconfigdata, parse_sysconfigdata,
+    raw_dylib_name_candidates,
 };
 
 use target_lexicon::{Architecture, OperatingSystem};
@@ -190,8 +191,9 @@ pub mod pyo3_build_script_impl {
         pub use crate::errors::*;
     }
     pub use crate::impl_::{
-        InterpreterConfig, PythonAbi, PythonAbiKind, PythonVersion, StableAbi, cargo_env_var,
-        env_var, is_linking_libpython_for_target, target_triple_from_env,
+        AutoDetectMode, BuildTool, InterpreterConfig, LibNameDecision, LibNameSource, PythonAbi,
+        PythonAbiKind, PythonVersion, StableAbi, cargo_env_var, decide_lib_name, env_var,
+        is_linking_libpython_for_target, raw_dylib_name_candidates, target_triple_from_env,
     };
 
     pub enum BuildConfigSource {
@@ -206,34 +208,67 @@ pub mod pyo3_build_script_impl {
     pub struct BuildConfig {
         pub interpreter_config: InterpreterConfig,
         pub source: BuildConfigSource,
+        /// Whether the interpreter config explicitly provided a `lib_name`.
+        pub lib_name_is_explicit: bool,
     }
 
     /// Gets the configuration for use from `pyo3-ffi`'s build script.
     pub fn resolve_build_config(target: &Triple) -> Result<BuildConfig> {
+        resolve_build_config_with_mode(target, AutoDetectMode::Disabled)
+    }
+
+    /// Gets the configuration for use from `pyo3-ffi`'s build script, optionally
+    /// recomputing the shared library name when automatic detection is enabled.
+    #[expect(
+        deprecated,
+        reason = "writing the automatically detected library name into the internal field"
+    )]
+    pub fn resolve_build_config_with_mode(
+        target: &Triple,
+        mode: AutoDetectMode,
+    ) -> Result<BuildConfig> {
         #[allow(
             clippy::const_is_empty,
             reason = "CONFIG_FILE is generated in build.rs, content can vary"
         )]
-        if let Some(interpreter_config) =
+        let mut build_config = if let Some(interpreter_config) =
             InterpreterConfig::from_pyo3_config_file_env(target).transpose()?
         {
-            Ok(BuildConfig {
+            BuildConfig {
+                lib_name_is_explicit: interpreter_config.lib_name_is_explicit,
                 interpreter_config,
                 source: BuildConfigSource::ConfigFile,
-            })
+            }
         } else if let Some(interpreter_config) = make_cross_compile_config(target)? {
-            Ok(BuildConfig {
+            BuildConfig {
+                lib_name_is_explicit: false,
                 interpreter_config,
                 source: BuildConfigSource::CrossCompile,
-            })
+            }
         } else {
             // No config file, and no cross compile config, so fall back to trying to find an interpreter on the host system.
             let host_config = make_interpreter_config();
-            Ok(BuildConfig {
+            BuildConfig {
+                lib_name_is_explicit: false,
                 interpreter_config: host_config?,
                 source: BuildConfigSource::Host,
-            })
+            }
+        };
+
+        if mode == AutoDetectMode::Enabled && !build_config.lib_name_is_explicit {
+            let decision = decide_lib_name(
+                &build_config.interpreter_config,
+                target,
+                mode,
+                BuildTool::Cargo,
+                false,
+            );
+            if let Some(lib_name) = decision.lib_name {
+                build_config.interpreter_config.lib_name = Some(lib_name);
+            }
         }
+
+        Ok(build_config)
     }
 
     /// Helper to generate an error message when the configured Python version is newer

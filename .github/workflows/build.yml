@@ -131,6 +131,21 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
+      - name: Test auto-detect-python-lib
+        if: ${{ inputs.rust == 'stable' }}
+        shell: bash
+        run: uv run --isolated --only-group nox nox -s test-auto-detect-lib
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          PYO3_SKIP_MESON_AUTO_DETECT: "1"
+
+      - name: Test meson auto-detect-python-lib
+        if: ${{ inputs.rust == 'stable' }}
+        shell: bash
+        run: uv run --isolated --only-group nox nox -f examples/meson-starter/noxfile.py -- --features pyo3/auto-detect-python-lib
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
       - uses: $/.github/actions/report-coverage
         if: ${{ inputs.sha && inputs.os != 'windows-11-arm' }} # https://github.com/rust-lang/rust/issues/150123
         with:

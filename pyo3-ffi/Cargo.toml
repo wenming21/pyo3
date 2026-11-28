@@ -40,8 +40,13 @@ abi3t-py315 = ["abi3t"]
 extension-module = ["pyo3-build-config/extension-module"]
 generate-import-lib = ["pyo3-build-config/generate-import-lib"]
 
+# Automatically detects the Python shared library name at build time and uses it
+# instead of the enumerated DLL name list.
+auto-detect-python-lib = []
+
 [dev-dependencies]
 paste = "1"
+pyo3-build-config = { path = "../pyo3-build-config", version = "=0.30.0" }
 
 [build-dependencies]
 pyo3-build-config = { path = "../pyo3-build-config", version = "=0.30.0" }

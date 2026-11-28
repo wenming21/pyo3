@@ -104,6 +104,7 @@ GRAALPY_VERSIONS = _supported_interpreter_versions("graalpy")
 def test(session: nox.Session) -> None:
     test_rust(session)
     test_py(session)
+    test_auto_detect_lib(session)
 
 
 @nox.session(name="test-rust", venv_backend="none")
@@ -208,6 +209,32 @@ def test_py(session: nox.Session) -> None:
         if _is_no_std() and example.startswith("examples/setuptools-rust-starter"):
             continue
         _run(session, "nox", "-f", example, *extra_args, external=True)
+
+
+@nox.session(name="test-auto-detect-lib", venv_backend="none")
+def test_auto_detect_lib(session: nox.Session) -> None:
+    _run(session, sys.executable, "tests/auto_detect_lib.py", "--mode", "cargo")
+
+    if os.environ.get("PYO3_SKIP_MESON_AUTO_DETECT") == "1":
+        print("skip: meson auto-detect checks disabled by PYO3_SKIP_MESON_AUTO_DETECT")
+    elif shutil.which("meson") is None:
+        print(
+            "skip: meson is not installed; the meson checks are covered by "
+            "the examples/meson-starter CI job"
+        )
+    else:
+        _run(
+            session,
+            "nox",
+            "-f",
+            "examples/meson-starter/noxfile.py",
+            "--",
+            "--features",
+            "pyo3/auto-detect-python-lib",
+            external=True,
+        )
+
+    _run(session, sys.executable, "tests/auto_detect_lib_perf.py", *session.posargs)
 
 
 @nox.session(venv_backend="none")

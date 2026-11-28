@@ -276,6 +276,12 @@ pub struct InterpreterConfig {
     )]
     pub python_framework_prefix: Option<String>,
     pypy_version: Option<PythonVersion>,
+    /// Whether `lib_name` was explicitly provided by `PYO3_CONFIG_FILE`.
+    ///
+    /// This flag is not serialized; it only informs the build script that parsed
+    /// the config file whether the configured name takes priority over automatic
+    /// detection.
+    pub(crate) lib_name_is_explicit: bool,
 }
 
 // Should no longer be deprecated once the internal fields are private
@@ -694,11 +700,14 @@ print("debug", bool(debug))
                 .context("failed to parse contents of PYO3_CONFIG_FILE")?
                 .apply_build_env()?;
 
+            let lib_name_is_explicit = config.lib_name.is_some();
+
             // For config files which don't apply a lib name, apply a default which we can use
             // for linking.
             if config.lib_name.is_none() {
                 config.lib_name = Some(default_lib_name_for_target(config.target_abi, target));
             }
+            config.lib_name_is_explicit = lib_name_is_explicit;
 
             Ok(config)
         })
@@ -1513,6 +1522,7 @@ impl InterpreterConfigBuilder {
             extra_build_script_lines: self.extra_build_script_lines,
             python_framework_prefix: self.python_framework_prefix,
             pypy_version: self.pypy_version,
+            lib_name_is_explicit: false,
         })
     }
 }
@@ -2507,8 +2517,9 @@ fn load_cross_compile_config(
 /// Generates the default library name for the target platform.
 fn default_lib_name_for_target(abi: PythonAbi, target: &Triple) -> String {
     if target.operating_system == OperatingSystem::Windows {
-        // assume not mingw
-        default_lib_name_windows(abi, false)
+        // MinGW targets use Unix-style lib names with a `lib` prefix.
+        let mingw = target.environment == Environment::Gnu;
+        default_lib_name_windows(abi, mingw)
     } else {
         default_lib_name_unix(
             abi,
@@ -2568,7 +2579,7 @@ fn default_lib_name_windows(abi: PythonAbi, mingw: bool) -> String {
 
 fn default_lib_name_unix(
     abi: PythonAbi,
-    mut use_stable_abi_lib: bool,
+    _use_stable_abi_lib: bool,
     ld_version: Option<&str>,
 ) -> String {
     match abi.implementation {
@@ -2578,7 +2589,7 @@ fn default_lib_name_unix(
                 let major = abi.version.major;
                 // Stable ABI uses python3 without the minor version number, on unix
                 // the minor version has a `.` separator if present
-                use_stable_abi_lib &= matches!(abi.kind, PythonAbiKind::Stable(_));
+                let use_stable_abi_lib = matches!(abi.kind, PythonAbiKind::Stable(_));
                 let sep = if use_stable_abi_lib { "" } else { "." };
                 let minor = if use_stable_abi_lib {
                     "".to_string()
@@ -2597,6 +2608,197 @@ fn default_lib_name_unix(
 
         PythonImplementation::GraalPy => "python-native".to_string(),
         PythonImplementation::RustPython => "rustpython_capi".to_string(),
+    }
+}
+
+/// All Python shared library names which the `extern_libpython!` macro can express
+/// as `#[link]` literals.
+///
+/// This list is only an encoding table for the pre-existing enumerated path and for
+/// the meson "inline" channel; it is not the source of automatically detected names.
+pub const RAW_DYLIB_NAME_CANDIDATES: &[&str] = &[
+    // stable ABI
+    "python3",
+    "python3_d",
+    "python3t",
+    "python3t_d",
+    // CPython 3.9 - 3.16 (inclusive, matching the supported versions plus the next prerelease)
+    "python39",
+    "python39_d",
+    "python310",
+    "python310_d",
+    "python311",
+    "python311_d",
+    "python312",
+    "python312_d",
+    "python313",
+    "python313_d",
+    "python314",
+    "python314_d",
+    "python315",
+    "python315_d",
+    "python316",
+    "python316_d",
+    // free-threaded builds (3.13+)
+    "python313t",
+    "python313t_d",
+    "python314t",
+    "python314t_d",
+    "python315t",
+    "python315t_d",
+    "python316t",
+    "python316t_d",
+    // PyPy
+    "libpypy3.11-c",
+    "libpypy3.12-c",
+    "libpypy3.13-c",
+    // GraalPy
+    "python-native",
+];
+
+/// Returns all shared library names which can be expressed by the existing
+/// `extern_libpython!` candidate list.
+pub fn raw_dylib_name_candidates() -> &'static [&'static str] {
+    RAW_DYLIB_NAME_CANDIDATES
+}
+
+/// Whether automatic shared library name detection is enabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoDetectMode {
+    /// Use the pre-existing enumerated behaviour.
+    Disabled,
+    /// Derive the shared library name from the target interpreter configuration.
+    Enabled,
+}
+
+/// The build tool which drives the build.
+///
+/// This is only used for logging; it must not affect name derivation, mutual
+/// exclusion or fallback decisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildTool {
+    Cargo,
+    Meson,
+}
+
+/// Where the final shared library name came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LibNameSource {
+    /// An explicitly configured name (e.g. `lib_name` in `PYO3_CONFIG_FILE`).
+    Configured,
+    /// Derived from the target interpreter configuration.
+    Detected,
+    /// The pre-existing enumerated name from the interpreter config.
+    Enumerated,
+    /// The name could not be determined or is not usable for the requested link style.
+    Fallback,
+}
+
+/// The result of deciding which Python shared library name to link against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibNameDecision {
+    pub lib_name: Option<String>,
+    pub source: LibNameSource,
+    pub raw_dylib_eligible: bool,
+    pub reason: Option<String>,
+}
+
+fn lib_name_characters_valid(lib_name: &str) -> bool {
+    !lib_name.is_empty()
+        && lib_name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn is_supported_auto_detect_platform(target: &Triple) -> bool {
+    matches!(
+        target.operating_system,
+        OperatingSystem::Windows | OperatingSystem::Linux | OperatingSystem::Darwin(_)
+    )
+}
+
+/// Decide the shared library name for the current build.
+///
+/// This is a pure function: it performs no IO and does not inspect the environment.
+/// The priority is: explicitly configured name, automatically detected name, the
+/// pre-existing enumerated name (feature disabled), and finally a fallback.
+pub fn decide_lib_name(
+    config: &InterpreterConfig,
+    target: &Triple,
+    mode: AutoDetectMode,
+    tool: BuildTool,
+    lib_name_is_explicit: bool,
+) -> LibNameDecision {
+    let _ = tool;
+
+    if mode == AutoDetectMode::Disabled {
+        let lib_name = config.lib_name().map(ToOwned::to_owned);
+        let raw_dylib_eligible = target.operating_system == OperatingSystem::Windows
+            && lib_name
+                .as_deref()
+                .is_some_and(|name| RAW_DYLIB_NAME_CANDIDATES.contains(&name));
+        return LibNameDecision {
+            lib_name,
+            source: LibNameSource::Enumerated,
+            raw_dylib_eligible,
+            reason: None,
+        };
+    }
+
+    if lib_name_is_explicit {
+        return match config.lib_name() {
+            Some(name) if lib_name_characters_valid(name) => LibNameDecision {
+                lib_name: Some(name.to_owned()),
+                source: LibNameSource::Configured,
+                raw_dylib_eligible: target.operating_system == OperatingSystem::Windows,
+                reason: None,
+            },
+            Some(name) => LibNameDecision {
+                lib_name: Some(name.to_owned()),
+                source: LibNameSource::Fallback,
+                raw_dylib_eligible: false,
+                reason: Some(
+                    "explicitly configured library name contains unsupported characters"
+                        .to_string(),
+                ),
+            },
+            None => LibNameDecision {
+                lib_name: None,
+                source: LibNameSource::Fallback,
+                raw_dylib_eligible: false,
+                reason: Some("explicitly configured library name is missing".to_string()),
+            },
+        };
+    }
+
+    if !is_supported_auto_detect_platform(target) {
+        return LibNameDecision {
+            lib_name: None,
+            source: LibNameSource::Fallback,
+            raw_dylib_eligible: false,
+            reason: Some(format!(
+                "automatic library name detection does not support target {target}"
+            )),
+        };
+    }
+
+    let lib_name = default_lib_name_for_target(config.target_abi(), target);
+    if !lib_name_characters_valid(&lib_name) {
+        return LibNameDecision {
+            lib_name: None,
+            source: LibNameSource::Fallback,
+            raw_dylib_eligible: false,
+            reason: Some(
+                "derived library name is empty or contains unsupported characters".to_string(),
+            ),
+        };
+    }
+
+    LibNameDecision {
+        raw_dylib_eligible: target.operating_system == OperatingSystem::Windows,
+        lib_name: Some(lib_name),
+        source: LibNameSource::Detected,
+        reason: None,
     }
 }
 
@@ -3388,7 +3590,7 @@ mod tests {
         let implementation = PythonImplementation::CPython;
         let version = PythonVersion::PY39;
         let config = InterpreterConfigBuilder::new(implementation, version)
-            .lib_name("python39".to_string())
+            .lib_name("libpython3.9".to_string())
             .lib_dir("/usr/lib/mingw".to_string())
             .finalize()
             .unwrap();
@@ -4737,7 +4939,7 @@ mod tests {
 
         // abi3
         let lib_name = default_lib_name_for_target(cpy313_abi3, &unix);
-        assert_eq!(lib_name, "python3.13");
+        assert_eq!(lib_name, "python3");
 
         let lib_name = default_lib_name_for_target(cpy313_abi3, &win_x64);
         assert_eq!(lib_name, "python3");
@@ -4761,8 +4963,8 @@ mod tests {
                 "python3.14td",
                 "python314t_d",
             ),
-            ("CPython-abi3-3.10-debug", "python3.10d", "python3_d"),
-            ("CPython-abi3t-3.15-debug", "python3.15td", "python3t_d"),
+            ("CPython-abi3-3.10-debug", "python3d", "python3_d"),
+            ("CPython-abi3t-3.15-debug", "python3td", "python3t_d"),
         ] {
             let abi = abi.parse().unwrap();
             assert_eq!(default_lib_name_for_target(abi, &unix), unix_name);
@@ -4791,5 +4993,209 @@ mod tests {
         let mut buf = Vec::new();
         config.to_writer(&mut buf).unwrap();
         assert_eq!(config, InterpreterConfig::from_reader(&*buf).unwrap());
+    }
+
+    #[test]
+    fn default_lib_name_for_mingw_target() {
+        let abi = PythonAbiBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+            .finalize()
+            .unwrap();
+        assert_eq!(
+            default_lib_name_for_target(abi, &triple!("x86_64-pc-windows-gnu")),
+            "libpython3.10"
+        );
+        assert_eq!(
+            default_lib_name_for_target(abi, &triple!("x86_64-pc-windows-msvc")),
+            "python310"
+        );
+    }
+
+    #[test]
+    fn raw_dylib_name_candidates_cover_supported_range() {
+        let candidates = raw_dylib_name_candidates();
+        for expected in [
+            "python3",
+            "python3_d",
+            "python3t",
+            "python3t_d",
+            "python39",
+            "python310",
+            "python313t",
+            "python316",
+            "python316t_d",
+            "libpypy3.11-c",
+            "python-native",
+        ] {
+            assert!(
+                candidates.contains(&expected),
+                "missing candidate {expected}"
+            );
+        }
+        assert!(!candidates.contains(&"python38"));
+    }
+
+    #[test]
+    fn decide_lib_name_detects_names_across_platforms() {
+        let abi = PythonAbiBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+            .debug()
+            .finalize()
+            .unwrap();
+        let config =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .target_abi(abi)
+                .finalize()
+                .unwrap();
+
+        for (target, expected) in [
+            ("x86_64-pc-windows-msvc", "python310_d"),
+            ("x86_64-pc-windows-gnu", "libpython3.10d"),
+            ("x86_64-unknown-linux-gnu", "python3.10d"),
+            ("aarch64-apple-darwin", "python3.10d"),
+        ] {
+            let target: Triple = target.parse().unwrap();
+            let decision = decide_lib_name(
+                &config,
+                &target,
+                AutoDetectMode::Enabled,
+                BuildTool::Cargo,
+                false,
+            );
+            assert_eq!(decision.lib_name.as_deref(), Some(expected));
+            assert_eq!(decision.source, LibNameSource::Detected);
+            assert_eq!(
+                decision.raw_dylib_eligible,
+                target.operating_system == OperatingSystem::Windows
+            );
+        }
+    }
+
+    #[test]
+    fn decide_lib_name_respects_stable_abi() {
+        for (stable_abi, window_expected, unix_expected) in [
+            (StableAbi::Abi3, "python3", "python3"),
+            (StableAbi::Abi3t, "python3t", "python3t"),
+        ] {
+            let abi = PythonAbiBuilder::new(PythonImplementation::CPython, PythonVersion::PY315)
+                .stable_abi(stable_abi)
+                .finalize()
+                .unwrap();
+            let config =
+                InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY315)
+                    .target_abi(abi)
+                    .finalize()
+                    .unwrap();
+
+            let windows = decide_lib_name(
+                &config,
+                &triple!("x86_64-pc-windows-msvc"),
+                AutoDetectMode::Enabled,
+                BuildTool::Cargo,
+                false,
+            );
+            assert_eq!(windows.lib_name.as_deref(), Some(window_expected));
+            assert_eq!(windows.source, LibNameSource::Detected);
+
+            let linux = decide_lib_name(
+                &config,
+                &triple!("x86_64-unknown-linux-gnu"),
+                AutoDetectMode::Enabled,
+                BuildTool::Cargo,
+                false,
+            );
+            assert_eq!(linux.lib_name.as_deref(), Some(unix_expected));
+        }
+    }
+
+    #[test]
+    fn decide_lib_name_prefers_explicit_configuration() {
+        let abi = PythonAbiBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+            .stable_abi(StableAbi::Abi3)
+            .finalize()
+            .unwrap();
+        let config =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .target_abi(abi)
+                .lib_name("python310".to_string())
+                .finalize()
+                .unwrap();
+
+        let decision = decide_lib_name(
+            &config,
+            &triple!("x86_64-pc-windows-msvc"),
+            AutoDetectMode::Enabled,
+            BuildTool::Cargo,
+            true,
+        );
+        assert_eq!(decision.lib_name.as_deref(), Some("python310"));
+        assert_eq!(decision.source, LibNameSource::Configured);
+        assert!(decision.raw_dylib_eligible);
+    }
+
+    #[test]
+    fn decide_lib_name_falls_back_for_invalid_or_unsupported_inputs() {
+        let config =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .finalize()
+                .unwrap();
+
+        let wasm = decide_lib_name(
+            &config,
+            &triple!("wasm32-unknown-unknown"),
+            AutoDetectMode::Enabled,
+            BuildTool::Cargo,
+            false,
+        );
+        assert_eq!(wasm.lib_name, None);
+        assert_eq!(wasm.source, LibNameSource::Fallback);
+        assert!(wasm.reason.is_some());
+
+        let explicit_invalid =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .lib_name("python 310".to_string())
+                .finalize()
+                .unwrap();
+        let decision = decide_lib_name(
+            &explicit_invalid,
+            &triple!("x86_64-pc-windows-msvc"),
+            AutoDetectMode::Enabled,
+            BuildTool::Cargo,
+            true,
+        );
+        assert_eq!(decision.source, LibNameSource::Fallback);
+        assert!(!decision.raw_dylib_eligible);
+        assert!(decision.reason.is_some());
+    }
+
+    #[test]
+    fn decide_lib_name_disabled_preserves_enumerated_name() {
+        let config =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .lib_name("python313".to_string())
+                .finalize()
+                .unwrap();
+        let decision = decide_lib_name(
+            &config,
+            &triple!("x86_64-pc-windows-msvc"),
+            AutoDetectMode::Disabled,
+            BuildTool::Cargo,
+            false,
+        );
+        assert_eq!(decision.lib_name.as_deref(), Some("python313"));
+        assert_eq!(decision.source, LibNameSource::Enumerated);
+        assert!(decision.raw_dylib_eligible);
+
+        let config =
+            InterpreterConfigBuilder::new(PythonImplementation::CPython, PythonVersion::PY310)
+                .lib_name("python317".to_string())
+                .finalize()
+                .unwrap();
+        let decision = decide_lib_name(
+            &config,
+            &triple!("x86_64-pc-windows-msvc"),
+            AutoDetectMode::Disabled,
+            BuildTool::Cargo,
+            false,
+        );
+        assert!(!decision.raw_dylib_eligible);
     }
 }

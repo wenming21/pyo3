@@ -86,6 +86,18 @@ If you do not enable this feature, you should call `Python::initialize()` before
 
 ## Advanced Features
 
+### `auto-detect-python-lib`
+
+This feature enables automatic detection of the Python shared library name at build time on Linux, Windows, and macOS.
+When enabled, PyO3 derives the library name from the target interpreter configuration (version, implementation, debug and free-threaded flags, stable ABI, MinGW, PyPy, and GraalPy) instead of selecting from the enumerated DLL name list.
+
+This feature is mutually exclusive with the enumerated DLL name path: enabling it disables the enumerated candidate selection.
+An explicitly configured `lib_name` (for example in `PYO3_CONFIG_FILE`) takes priority.
+On Windows, the deprecated `generate-import-lib` feature is ignored with a warning when this feature is enabled.
+If the library name cannot be determined, PyO3 falls back to full library linking and the build continues.
+
+This feature is disabled by default, and disabling it keeps the previous build behavior unchanged.
+
 ### `experimental-async`
 
 This feature adds support for `async fn` in `#[pyfunction]` and `#[pymethods]`.
